@@ -1,6 +1,8 @@
+require('dotenv').config();
 const express = require('express');
 const bodyParser = require('body-parser');
 const { v4: uuidv4 } = require('uuid');
+const mongoose = require('mongoose');
 const cors = require('cors');
 
 const app = express();
@@ -11,11 +13,28 @@ app.use(cors());
 
 const BASE_URL = '/tmf-api/serviceCatalogManagement/v4';
 
-let serviceSpecifications = [];
+// Base URL root route handler — Fix for "Cannot GET" error
+app.get(BASE_URL, (req, res) => {
+  res.send('TMF Service Catalog Management API root');
+});
 
-// ✅ Root route to prevent "Cannot GET /" on Railway
+// Mongoose model
+const serviceSpecSchema = new mongoose.Schema({
+  '@type': { type: String, default: 'ServiceSpecification' },
+  id: String,
+  href: String,
+  name: String,
+  version: String,
+  lifecycleStatus: String,
+  isBundle: Boolean,
+  lastUpdate: String
+}, { collection: 'serviceSpecifications' });
+
+const ServiceSpecification = mongoose.model('ServiceSpecification', serviceSpecSchema);
+
+// Root route
 app.get('/', (req, res) => {
-  res.send('🚀 TMF Service Catalog API is running');
+  res.send('🚀 TMF Service Catalog API with MongoDB is running');
 });
 
 // Logger middleware
@@ -24,125 +43,100 @@ app.use((req, res, next) => {
   next();
 });
 
-// Helper: create Service Specification with mandatory fields
-function createServiceSpec(input = {}, host) {
-  const id = input.id || uuidv4();
-  const now = input.lastUpdate || new Date().toISOString();
-  return {
-    '@type': input['@type'] || 'ServiceSpecification',
-    id,
-    href: `http://${host}${BASE_URL}/serviceSpecification/${id}`,
-    name: input.name || `Default Service ${id}`,
-    version: input.version || '1.0',
-    lifecycleStatus: input.lifecycleStatus || 'active',
-    isBundle: input.isBundle !== undefined ? input.isBundle : false,
-    lastUpdate: now
-  };
-}
-
-// Pre-load a fixed test resource
-app.get('/preload', (req, res) => {
-  const testSpec = createServiceSpec({
-    id: '5ae4dc5f-8031-40f6-ab85-ca6912d8635c',
-    name: 'TestServiceName',
-    lifecycleStatus: 'active',
-    isBundle: true,
-    lastUpdate: '2025-07-01T00:00:00Z'
-  }, req.headers.host);
-  serviceSpecifications.push(testSpec);
-  res.send('Test spec preloaded');
+// GET all serviceSpecifications
+app.get(`${BASE_URL}/serviceSpecification`, async (req, res) => {
+  try {
+    const specs = await ServiceSpecification.find();
+    res.status(200).json(specs);
+  } catch (err) {
+    console.error(err);
+    res.status(500).send('Server error');
+  }
 });
 
-// GET all or filtered
-app.get(`${BASE_URL}/serviceSpecification`, (req, res) => {
-  const { fields, ...filters } = req.query;
-  let results = [...serviceSpecifications];
-
-  Object.entries(filters).forEach(([key, value]) => {
-    results = results.filter(item => {
-      if (typeof item[key] === 'boolean') {
-        return item[key] === (value === 'true');
-      }
-      if (typeof item[key] === 'string') {
-        return item[key].toLowerCase() === value.toLowerCase();
-      }
-      return item[key]?.toString() === value;
+// POST create serviceSpecification
+app.post(`${BASE_URL}/serviceSpecification`, async (req, res) => {
+  try {
+    const id = req.body.id || uuidv4();
+    const now = new Date().toISOString();
+    const spec = new ServiceSpecification({
+      ...req.body,
+      id,
+      href: `http://${req.headers.host}${BASE_URL}/serviceSpecification/${id}`,
+      lastUpdate: now,
+      '@type': req.body['@type'] || 'ServiceSpecification'
     });
+    await spec.save();
+    res.status(201).json(spec);
+  } catch (err) {
+    console.error(err);
+    res.status(500).send('Server error');
+  }
+});
+
+// GET serviceSpecification by ID
+app.get(`${BASE_URL}/serviceSpecification/:id`, async (req, res) => {
+  try {
+    const spec = await ServiceSpecification.findOne({ id: req.params.id });
+    if (!spec) {
+      return res.status(404).json({ code: 404, error: 'Not found' });
+    }
+    res.status(200).json(spec);
+  } catch (err) {
+    console.error(err);
+    res.status(500).send('Server error');
+  }
+});
+
+// PATCH update serviceSpecification by ID
+app.patch(`${BASE_URL}/serviceSpecification/:id`, async (req, res) => {
+  try {
+    const updated = await ServiceSpecification.findOneAndUpdate(
+      { id: req.params.id },
+      { ...req.body, lastUpdate: new Date().toISOString() },
+      { new: true }
+    );
+    if (!updated) {
+      return res.status(404).json({ code: 404, error: 'Not found' });
+    }
+    updated.href = `http://${req.headers.host}${BASE_URL}/serviceSpecification/${updated.id}`;
+    await updated.save();
+    res.status(200).json(updated);
+  } catch (err) {
+    console.error(err);
+    res.status(500).send('Server error');
+  }
+});
+
+// DELETE serviceSpecification by ID
+app.delete(`${BASE_URL}/serviceSpecification/:id`, async (req, res) => {
+  try {
+    const deleted = await ServiceSpecification.findOneAndDelete({ id: req.params.id });
+    if (!deleted) {
+      return res.status(404).json({ code: 404, error: 'Not found' });
+    }
+    res.status(204).send();
+  } catch (err) {
+    console.error(err);
+    res.status(500).send('Server error');
+  }
+});
+
+// MongoDB connection setup
+const user = process.env.MONGO_USER;
+const password = encodeURIComponent(process.env.MONGO_PW);
+const dbName = process.env.MONGO_DB;
+const clusterUrl = 'cluster0.mr1gaxu.mongodb.net'; // Your MongoDB Atlas cluster hostname
+
+const mongoUri = `mongodb+srv://${user}:${password}@${clusterUrl}/${dbName}?retryWrites=true&w=majority&appName=Cluster0`;
+
+mongoose.connect(mongoUri)
+  .then(() => {
+    console.log('✅ Connected to MongoDB Atlas');
+    app.listen(port, () => {
+      console.log(`🚀 Server running at http://localhost:${port}${BASE_URL}`);
+    });
+  })
+  .catch(err => {
+    console.error('❌ MongoDB connection error:', err);
   });
-
-  if (fields) {
-    const fieldList = fields.split(',');
-    results = results.map(item => {
-      const selected = {};
-      fieldList.forEach(f => {
-        if (f in item) selected[f] = item[f];
-      });
-      return selected;
-    });
-  }
-
-  res.status(200).json(results);
-});
-
-// POST create
-app.post(`${BASE_URL}/serviceSpecification`, (req, res) => {
-  const spec = createServiceSpec(req.body, req.headers.host);
-
-  // Ensure unique name if same name exists
-  const duplicate = serviceSpecifications.find(s => s.name.toLowerCase() === spec.name.toLowerCase());
-  if (duplicate) {
-    spec.name += '-' + new Date().getTime();
-  }
-
-  // Ensure unique lastUpdate timestamps
-  const now = new Date();
-  spec.lastUpdate = new Date(now.getTime() + serviceSpecifications.length * 1000).toISOString();
-
-  serviceSpecifications.push(spec);
-  res.status(201).json(spec);
-});
-
-// GET by ID
-app.get(`${BASE_URL}/serviceSpecification/:id`, (req, res) => {
-  const spec = serviceSpecifications.find(s => s.id === req.params.id);
-  if (!spec) {
-    return res.status(404).json({ code: 404, error: 'Not found' });
-  }
-  res.status(200).json(spec);
-});
-
-// PATCH
-app.patch(`${BASE_URL}/serviceSpecification/:id`, (req, res) => {
-  const index = serviceSpecifications.findIndex(s => s.id === req.params.id);
-  if (index === -1) {
-    return res.status(404).json({ code: 404, error: 'Not found' });
-  }
-
-  const updated = {
-    ...serviceSpecifications[index],
-    ...req.body,
-    lastUpdate: new Date().toISOString()
-  };
-
-  updated.href = `http://${req.headers.host}${BASE_URL}/serviceSpecification/${updated.id}`;
-  if (!updated['@type']) updated['@type'] = 'ServiceSpecification';
-  if (updated.isBundle === undefined) updated.isBundle = false;
-  if (!updated.lifecycleStatus) updated.lifecycleStatus = 'active';
-
-  serviceSpecifications[index] = updated;
-  res.status(200).json(updated);
-});
-
-// DELETE
-app.delete(`${BASE_URL}/serviceSpecification/:id`, (req, res) => {
-  const index = serviceSpecifications.findIndex(s => s.id === req.params.id);
-  if (index === -1) {
-    return res.status(404).json({ code: 404, error: 'Not found' });
-  }
-  serviceSpecifications.splice(index, 1);
-  res.status(204).send();
-});
-
-app.listen(port, () => {
-  console.log(`✅ Server running at http://localhost:${port}${BASE_URL}`);
-});
